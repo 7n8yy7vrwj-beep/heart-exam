@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>教师端 - 心脏听诊AI监控</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a2a3a; font-family: system-ui; padding: 20px; }
+        .container { max-width: 1400px; margin: auto; }
+        .header { background: #1e466e; color: white; padding: 15px 20px; border-radius: 20px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        .room-control { background: white; padding: 10px 20px; border-radius: 40px; display: flex; gap: 10px; align-items: center; }
+        .room-control input { padding: 8px; border-radius: 20px; border: 1px solid #ccc; }
+        button { background: #2c7da0; color: white; border: none; padding: 8px 16px; border-radius: 20px; cursor: pointer; }
+        .students-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 20px; }
+        .student-card { background: white; border-radius: 20px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .student-header { background: #2c3e50; color: white; padding: 10px 15px; font-weight: bold; }
+        .video-area { aspect-ratio: 4/3; background: #000; position: relative; }
+        .video-area video { width: 100%; height: 100%; object-fit: cover; }
+        .ai-feedback { padding: 10px; background: #f8f9fa; font-size: 0.8rem; border-top: 1px solid #ddd; }
+        .order-track { background: #e8f0fe; padding: 8px; margin: 10px; border-radius: 12px; font-size: 0.7rem; display: flex; flex-wrap: wrap; gap: 5px; justify-content: center; }
+        .records { margin-top: 30px; background: white; border-radius: 20px; padding: 20px; overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #eee; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h2>👩‍🏫 心脏听诊AI实训监控</h2>
+        <div class="room-control">
+            <span>房间号:</span>
+            <input type="text" id="roomInput" placeholder="输入房间号" value="heart001">
+            <button id="connectBtn">连接学生</button>
+        </div>
+    </div>
+    <div class="students-grid" id="studentsGrid"></div>
+    <div class="records">
+        <h3>📋 考核记录</h3>
+        <table id="recordsTable"><thead><tr><th>时间</th><th>学生</th><th>AI评价</th><th>进度</th></tr></thead><tbody id="recordsBody"></tbody></table>
+        <button id="exportBtn" style="margin-top: 15px;">导出CSV</button>
+    </div>
+</div>
+<script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+<script>
+    // 教师端：等待学生连接，接收视频流和AI消息
+    let peer = null;
+    let connections = [];
+    let allRecords = [];
+
+    const roomInput = document.getElementById('roomInput');
+    const connectBtn = document.getElementById('connectBtn');
+    const studentsGrid = document.getElementById('studentsGrid');
+    const recordsBody = document.getElementById('recordsBody');
+    
+    // 预设听诊区顺序（5个）
+    const correctOrder = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
+    // 存储每个学生的进度（用于显示）
+    let studentProgress = new Map(); // key: studentId, value: { completed: [], currentStep: 0 }
+
+    function addRecord(studentId, message, progress) {
+        const row = recordsBody.insertRow(0);
+        row.insertCell(0).innerText = new Date().toLocaleTimeString();
+        row.insertCell(1).innerText = studentId;
+        row.insertCell(2).innerText = message;
+        row.insertCell(3).innerText = progress;
+        allRecords.unshift({ time: new Date(), studentId, message, progress });
+    }
+
+    function createStudentCard(studentId) {
+        const card = document.createElement('div');
+        card.className = 'student-card';
+        card.id = `card-${studentId}`;
+        card.innerHTML = `
+            <div class="student-header">📱 学生: ${studentId}</div>
+            <div class="video-area"><video id="video-${studentId}" autoplay playsinline muted></video></div>
+            <div class="ai-feedback" id="fb-${studentId}">等待AI分析...</div>
+            <div class="order-track" id="track-${studentId}">⚪ 二尖瓣区 → ⚪ 肺动脉瓣区 → ⚪ 主动脉瓣区 → ⚪ 主动脉瓣第二听诊区 → ⚪ 三尖瓣区</div>
+        `;
+        studentsGrid.appendChild(card);
+        studentProgress.set(studentId, { completed: [], currentStep: 0 });
+        return card;
+    }
+
+    function updateStudentProgress(studentId, completedRegions) {
+        const trackDiv = document.getElementById(`track-${studentId}`);
+        if (!trackDiv) return;
+        let html = '';
+        correctOrder.forEach(region => {
+            if (completedRegions.includes(region)) {
+                html += `<span style="color:#2e7d32;">✅ ${region}</span> → `;
+            } else if (region === correctOrder[completedRegions.length] && completedRegions.length < 5) {
+                html += `<span style="color:#f0a500;">🟡 ${region}</span> → `;
+            } else {
+                html += `<span style="color:#999;">⚪ ${region}</span> → `;
+            }
+        });
+        trackDiv.innerHTML = html.slice(0, -3);
+    }
+
+    connectBtn.onclick = () => {
+        const room = roomInput.value.trim();
+        if (!room) return;
+        // 创建Peer（教师端使用固定ID + room前缀，方便学生找到）
+        const teacherId = `teacher-${room}`;
+        if (peer) peer.destroy();
+        peer = new Peer(teacherId);
+        
+        peer.on('open', () => {
+            console.log('教师端已启动，ID:', teacherId);
+            addRecord('系统', `教师端已启动，房间号: ${room}`, '');
+        });
+        
+        peer.on('connection', (conn) => {
+            conn.on('open', () => {
+                console.log('学生已连接:', conn.peer);
+                const studentId = conn.peer;
+                createStudentCard(studentId);
+                // 监听学生发来的消息
+                conn.on('data', (data) => {
+                    if (data.type === 'ai_result') {
+                        const fbDiv = document.getElementById(`fb-${studentId}`);
+                        if (fbDiv) fbDiv.innerHTML = `🤖 ${data.message} | 进度: ${data.progress}`;
+                        addRecord(studentId, data.message, data.progress);
+                        // 更新进度显示
+                        if (data.completedRegions) {
+                            studentProgress.set(studentId, { completed: data.completedRegions, currentStep: data.completedRegions.length });
+                            updateStudentProgress(studentId, data.completedRegions);
+                        }
+                    }
+                });
+            });
+        });
+        
+        peer.on('call', (call) => {
+            call.answer(); // 教师端不发送视频，只接收
+            call.on('stream', (remoteStream) => {
+                const studentId = call.peer;
+                const videoElem = document.getElementById(`video-${studentId}`);
+                if (videoElem) {
+                    videoElem.srcObject = remoteStream;
+                }
+            });
+        });
+        
+        peer.on('error', (err) => console.error(err));
+    };
+
+    document.getElementById('exportBtn').onclick = () => {
+        let csv = "时间,学生,AI评价,进度\n";
+        allRecords.forEach(r => {
+            csv += `"${r.time.toLocaleString()}","${r.studentId}","${r.message}","${r.progress}"\n`;
+        });
+        const blob = new Blob(["\uFEFF" + csv], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `实训记录_${Date.now()}.csv`;
+        a.click();
+    };
+</script>
+</body>
+</html>
