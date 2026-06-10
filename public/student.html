@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>学生端 - 心脏听诊实训</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a1a2a; font-family: system-ui; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 16px; }
+        .container { max-width: 500px; width: 100%; background: white; border-radius: 40px; overflow: hidden; }
+        .header { background: #1e466e; color: white; padding: 20px; text-align: center; }
+        .camera-area { background: black; aspect-ratio: 4/3; position: relative; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        .controls { padding: 20px; display: flex; gap: 12px; }
+        button { flex: 1; padding: 14px; border: none; border-radius: 60px; font-weight: bold; }
+        .btn-start { background: #2e7d32; color: white; }
+        .btn-stop { background: #c62828; color: white; }
+        .feedback { background: #f0f4f8; margin: 16px; padding: 16px; border-radius: 28px; font-size: 0.9rem; }
+        .task { background: #e8f0fe; margin: 16px; padding: 12px; border-radius: 20px; text-align: center; font-size: 0.8rem; }
+        .room-input { display: flex; gap: 10px; margin: 16px; }
+        .room-input input { flex: 1; padding: 10px; border-radius: 30px; border: 1px solid #ccc; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h2>🫀 心脏听诊实训</h2>
+        <p>学生端</p>
+    </div>
+    <div class="room-input" id="roomPanel">
+        <input type="text" id="roomInput" placeholder="输入房间号" value="heart001">
+        <button id="joinBtn">连接教师端</button>
+    </div>
+    <div id="examPanel" class="hidden">
+        <div class="camera-area"><video id="camera" autoplay playsinline muted></video></div>
+        <div class="controls">
+            <button id="startBtn" class="btn-start">开始考核</button>
+            <button id="stopBtn" class="btn-stop" disabled>结束</button>
+        </div>
+        <div class="task" id="taskHint">顺序：二尖瓣区 → 肺动脉瓣区 → 主动脉瓣区 → 主动脉瓣第二听诊区 → 三尖瓣区</div>
+        <div class="feedback" id="feedback">连接成功后，点击开始</div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+<script>
+    // 学生端：连接教师端，发送视频流和AI结果
+    let peer = null;
+    let conn = null;
+    let localStream = null;
+    let call = null;
+    let isActive = false;
+    let intervalId = null;
+    
+    // 听诊区顺序（默认，后续可从教师端同步）
+    const correctOrder = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
+    let currentStep = 0;
+    let completed = [];
+    let stepStartTime = null;
+    
+    // 教师端位置标注（简化：模拟从教师端获取，这里固定用相对位置）
+    // 实际项目中教师端可以标注坐标，这里我们简单用区域色块检测替代
+    // 由于没有真实模型，我们模拟AI检测：根据红色物体在屏幕上的大致区域判断
+    // 这是一个演示版，会随机或根据位置模拟正确/错误，你可以后续替换成真实模型
+    
+    // 为了演示完整流程，我们做一个基于Canvas的简单红色检测 + 区域判断（与之前类似）
+    // 同时将结果实时发送给教师端
+    
+    const video = document.getElementById('camera');
+    const joinBtn = document.getElementById('joinBtn');
+    const roomInput = document.getElementById('roomInput');
+    const roomPanel = document.getElementById('roomPanel');
+    const examPanel = document.getElementById('examPanel');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const feedbackDiv = document.getElementById('feedback');
+    const taskHint = document.getElementById('taskHint');
+    
+    // 定义五个区域在画面上的大概位置（归一化坐标0-1）
+    // 实际教师端可以上传图片标注，这里先预设
+    const regionPositions = {
+        "二尖瓣区": { x: 0.32, y: 0.71 },
+        "肺动脉瓣区": { x: 0.27, y: 0.37 },
+        "主动脉瓣区": { x: 0.68, y: 0.34 },
+        "主动脉瓣第二听诊区": { x: 0.55, y: 0.50 },
+        "三尖瓣区": { x: 0.72, y: 0.68 }
+    };
+    
+    async function initCamera() {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+            video.srcObject = localStream;
+            await video.play();
+            return true;
+        } catch(e) { feedbackDiv.innerHTML = '❌ 无法打开摄像头'; return false; }
+    }
+    
+    // 红色听诊头检测
+    function detectRedCenter(width, height) {
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, width, height);
+        const imgData = ctx.getImageData(0, 0, width, height);
+        const data = imgData.data;
+        let totalX = 0, totalY = 0, count = 0;
+        for (let y=0; y<height; y+=3) {
+            for (let x=0; x<width; x+=3) {
+                const idx = (y*width + x)*4;
+                const r = data[idx], g = data[idx+1], b = data[idx+2];
+                if (r > 110 && r > g+40 && r > b+40) {
+                    totalX += x; totalY += y; count++;
+                }
+            }
+        }
+        if (count < 20) return null;
+        return { x: totalX/count, y: totalY/count };
+    }
+    
+    function findRegion(x, y, w, h) {
+        const nx = x / w;
+        const ny = y / h;
+        let minDist = 0.15;
+        let matched = null;
+        for (let [region, pos] of Object.entries(regionPositions)) {
+            const dist = Math.hypot(nx - pos.x, ny - pos.y);
+            if (dist < minDist) {
+                minDist = dist;
+                matched = region;
+            }
+        }
+        return matched;
+    }
+    
+    function evaluateAndSend() {
+        if (!isActive || !conn) return;
+        const w = video.videoWidth, h = video.videoHeight;
+        if (!w) return;
+        const detection = detectRedCenter(w, h);
+        let detectedRegion = null;
+        if (detection) {
+            detectedRegion = findRegion(detection.x, detection.y, w, h);
+        }
+        
+        const expected = correctOrder[currentStep];
+        let message = '';
+        let stepCompleted = false;
+        let duration = 0;
+        
+        if (!detection) {
+            message = `未检测到听诊头，请放在 ${expected}`;
+        } else if (detectedRegion === expected) {
+            if (stepStartTime === null) {
+                stepStartTime = Date.now();
+                message = `✅ 位置正确，请保持3秒...`;
+            } else {
+                const elapsed = (Date.now() - stepStartTime) / 1000;
+                if (elapsed >= 3.0 && !completed.includes(expected)) {
+                    completed.push(expected);
+                    stepCompleted = true;
+                    duration = elapsed;
+                    currentStep++;
+                    stepStartTime = null;
+                    message = `🎉 ${expected} 完成！`;
+                    if (currentStep < correctOrder.length) {
+                        message += ` 下一步：${correctOrder[currentStep]}`;
+                    } else {
+                        message = `🏆 恭喜！完成全部听诊！`;
+                    }
+                } else {
+                    message = `📍 ${expected} 位置正确，还需 ${(3 - elapsed).toFixed(1)} 秒`;
+                }
+            }
+        } else {
+            stepStartTime = null;
+            message = `❌ 位置错误：当前在${detectedRegion || '未知'}，应在${expected}`;
+        }
+        
+        feedbackDiv.innerHTML = message;
+        taskHint.innerHTML = `当前任务: ${expected} | 已完成: ${completed.length}/5`;
+        
+        // 发送AI结果给教师端
+        conn.send({
+            type: 'ai_result',
+            message: message,
+            progress: `${completed.length}/${correctOrder.length}`,
+            completedRegions: completed,
+            stepCompleted: stepCompleted,
+            duration: duration
+        });
+    }
+    
+    // 连接教师端
+    joinBtn.onclick = async () => {
+        const room = roomInput.value.trim();
+        if (!room) return;
+        const teacherId = `teacher-${room}`;
+        if (peer) peer.destroy();
+        peer = new Peer();
+        peer.on('open', (studentId) => {
+            console.log('学生端ID:', studentId);
+            conn = peer.connect(teacherId);
+            conn.on('open', () => {
+                console.log('已连接到教师端');
+                // 开始视频通话
+                initCamera().then(() => {
+                    call = peer.call(teacherId, localStream);
+                    roomPanel.classList.add('hidden');
+                    examPanel.classList.remove('hidden');
+                });
+            });
+            conn.on('error', (err) => console.error(err));
+        });
+        peer.on('error', (err) => console.error(err));
+    };
+    
+    startBtn.onclick = () => {
+        if (!localStream) return;
+        isActive = true;
+        currentStep = 0;
+        completed = [];
+        stepStartTime = null;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        feedbackDiv.innerHTML = '考核进行中...';
+        if (intervalId) clearInterval(intervalId);
+        intervalId = setInterval(evaluateAndSend, 500);
+    };
+    
+    stopBtn.onclick = () => {
+        isActive = false;
+        clearInterval(intervalId);
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        feedbackDiv.innerHTML = '考核结束，等待教师端评价';
+    };
+</script>
+</body>
+</html>
