@@ -21,7 +21,7 @@ let examConfig = {
 };
 let submissions = [];
 
-// ---------- API 路由 ----------
+// ========== API 路由 ==========
 app.post('/upload_template', upload.single('template'), (req, res) => {
   const targetPath = path.join(__dirname, 'public', 'template.jpg');
   fs.renameSync(req.file.path, targetPath);
@@ -61,43 +61,84 @@ app.get('/get_submissions', (req, res) => {
   res.json(submissions);
 });
 
-// ---------- WebSocket 信令 ----------
+// ========== WebSocket 信令服务器 ==========
 const server = http.createServer(app);
 const io = socketIo(server, { cors: { origin: "*" } });
-const rooms = new Map();
+const rooms = new Map(); // roomName -> { teacherId, students: Set }
 
 io.on('connection', (socket) => {
+  console.log('新连接:', socket.id);
+
   socket.on('teacher-join', (roomName) => {
     socket.join(roomName);
     rooms.set(roomName, { teacherId: socket.id, students: new Set() });
+    console.log(`教师加入房间: ${roomName}, teacherId: ${socket.id}`);
   });
+
   socket.on('student-join', (roomName) => {
     socket.join(roomName);
     const room = rooms.get(roomName);
     if (room) {
       room.students.add(socket.id);
       io.to(room.teacherId).emit('new-student', socket.id);
+      console.log(`学生 ${socket.id} 加入房间 ${roomName}`);
     }
   });
+
+  // 转发 offer（学生 → 教师）
   socket.on('offer', (data) => {
-    io.to(data.target).emit('offer', { from: socket.id, offer: data.offer });
+    // 查找学生所在的房间，获取教师端 socket.id
+    let targetTeacherId = null;
+    for (let [roomName, room] of rooms.entries()) {
+      if (room.students.has(socket.id)) {
+        targetTeacherId = room.teacherId;
+        break;
+      }
+    }
+    if (targetTeacherId) {
+      io.to(targetTeacherId).emit('offer', { from: socket.id, offer: data.offer });
+    }
   });
+
+  // 转发 answer（教师 → 学生）
   socket.on('answer', (data) => {
     io.to(data.target).emit('answer', { from: socket.id, answer: data.answer });
   });
+
+  // 转发 ice-candidate（双向）
   socket.on('ice-candidate', (data) => {
     io.to(data.target).emit('ice-candidate', { from: socket.id, candidate: data.candidate });
   });
+
+  // AI 反馈（学生 → 教师）
+  socket.on('ai-feedback', (data) => {
+    let targetTeacherId = null;
+    for (let [roomName, room] of rooms.entries()) {
+      if (room.students.has(socket.id)) {
+        targetTeacherId = room.teacherId;
+        break;
+      }
+    }
+    if (targetTeacherId) {
+      io.to(targetTeacherId).emit('ai-feedback', data);
+    }
+  });
+
   socket.on('disconnect', () => {
     for (let [roomName, room] of rooms.entries()) {
-      if (room.teacherId === socket.id) rooms.delete(roomName);
-      else if (room.students.has(socket.id)) {
+      if (room.teacherId === socket.id) {
+        rooms.delete(roomName);
+        console.log(`教师离开房间: ${roomName}`);
+      } else if (room.students.has(socket.id)) {
         room.students.delete(socket.id);
         io.to(room.teacherId).emit('student-left', socket.id);
+        console.log(`学生离开房间: ${socket.id}`);
       }
     }
   });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
