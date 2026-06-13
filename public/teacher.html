@@ -1,6 +1,3 @@
-<!-- 在原有 teacher.html 基础上，在 <script> 区域添加 Peer 初始化 -->
-<!-- 完整代码较长，我给出核心添加部分，建议您直接复制下面的完整 teacher.html -->
-
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -8,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>教师端 - 心脏听诊AI实训监控中心</title>
     <style>
-        /* 样式保持不变，沿用之前的 */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: #eef2f7; font-family: system-ui, sans-serif; padding: 20px; }
         .container { max-width: 1400px; margin: auto; }
@@ -24,14 +20,15 @@
         .student-card { background: white; border-radius: 20px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
         .student-header { background: #2c3e50; color: white; padding: 10px 15px; display: flex; justify-content: space-between; }
         .video-preview { aspect-ratio: 4/3; background: #000; }
-        .video-preview img { width: 100%; height: 100%; object-fit: cover; }
+        .video-preview video { width: 100%; height: 100%; object-fit: cover; }
         .ai-feedback { padding: 10px; background: #f8f9fa; font-size: 0.8rem; border-top: 1px solid #ddd; }
         .order-track { background: #e8f0fe; padding: 8px; margin: 10px; border-radius: 12px; font-size: 0.7rem; display: flex; flex-wrap: wrap; gap: 5px; justify-content: center; }
         .records-table { background: white; border-radius: 20px; padding: 20px; overflow-x: auto; margin-top: 20px; }
         table { width: 100%; border-collapse: collapse; }
         th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
-        .room-control { background: white; padding: 15px; border-radius: 20px; margin-bottom: 20px; display: flex; gap: 10px; align-items: center; }
-        .room-control input { padding: 8px; border-radius: 20px; border: 1px solid #ccc; }
+        .room-control { background: white; border-radius: 20px; padding: 15px 20px; margin-bottom: 20px; display: flex; gap: 15px; align-items: center; flex-wrap: wrap; }
+        .room-control input { padding: 8px 12px; border-radius: 30px; border: 1px solid #ccc; }
+        .status-badge { background: #2e7d32; color: white; padding: 4px 12px; border-radius: 30px; font-size: 0.8rem; }
     </style>
 </head>
 <body>
@@ -41,15 +38,15 @@
         <div><span id="studentCount">0</span> 名学生在线</div>
     </div>
 
-    <!-- 新增：房间号设置与 Peer 启动 -->
+    <!-- 教师端 Peer 控制区 -->
     <div class="room-control">
-        <span>房间号:</span>
-        <input type="text" id="roomInput" value="heart001">
-        <button id="startTeacherBtn">启动教师端（等待学生连接）</button>
-        <span id="peerStatus" style="color: green;">未启动</span>
+        <span>📡 房间号：</span>
+        <input type="text" id="roomInput" value="heart001" placeholder="输入房间号">
+        <button id="startPeerBtn">🚀 启动教师端（等待学生连接）</button>
+        <span id="peerStatus" class="status-badge" style="background:#757575;">未启动</span>
     </div>
 
-    <!-- 原有配置区 -->
+    <!-- 配置区：顺序设置 -->
     <div class="config-card">
         <div class="config-title">📋 1. 设定听诊顺序（5个瓣膜区）</div>
         <div class="order-selector" id="orderSelector"></div>
@@ -57,6 +54,7 @@
         <span id="orderStatus"></span>
     </div>
 
+    <!-- 配置区：模板图上传和标注 -->
     <div class="config-card">
         <div class="config-title">📍 2. 上传模拟人标准照片并标注听诊区（只需做一次）</div>
         <input type="file" id="templateUpload" accept="image/*">
@@ -66,8 +64,12 @@
         <button id="saveRegionsBtn" style="display:none;">保存5个听诊区位置</button>
     </div>
 
-    <div class="students-grid" id="studentsGrid"></div>
+    <!-- 学生实时画面网格 -->
+    <div class="students-grid" id="studentsGrid">
+        <div style="grid-column:1/-1; text-align:center; padding:40px; color:#888;">教师端启动后，等待学生连接...</div>
+    </div>
 
+    <!-- 记录表 -->
     <div class="records-table">
         <h3>📋 考核记录</h3>
         <table id="recordsTable"><thead><tr><th>学生</th><th>时间</th><th>AI评价</th><th>进度</th></tr></thead><tbody id="recordsBody"></tbody></table>
@@ -75,97 +77,106 @@
     </div>
 </div>
 
-<script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
 <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
 <script>
-    // Socket.io 部分保持不变（用于信令和记录，但这里其实可以和 Peer 独立）
-    const socket = io();
-    let studentsData = new Map();
-    let allRecords = [];
-
-    // Peer 相关
+    // ----------------------------- Peer 教师端逻辑 -----------------------------
     let peer = null;
     let connections = [];
-
-    // 房间号
     const roomInput = document.getElementById('roomInput');
-    const startTeacherBtn = document.getElementById('startTeacherBtn');
+    const startPeerBtn = document.getElementById('startPeerBtn');
     const peerStatusSpan = document.getElementById('peerStatus');
+    const studentsGrid = document.getElementById('studentsGrid');
+    const recordsBody = document.getElementById('recordsBody');
+    const studentCountSpan = document.getElementById('studentCount');
 
-    // 启动教师端 Peer
-    startTeacherBtn.onclick = () => {
+    startPeerBtn.onclick = () => {
         const room = roomInput.value.trim();
-        if (!room) return;
+        if (!room) {
+            alert('请输入房间号');
+            return;
+        }
         const teacherId = `teacher-${room}`;
-        if (peer) peer.destroy();
+        if (peer) {
+            peer.destroy();
+            connections = [];
+            studentsGrid.innerHTML = '<div style="grid-column:1/-1; text-align:center; padding:40px; color:#888;">教师端重新启动，等待学生连接...</div>';
+        }
         peer = new Peer(teacherId);
         peer.on('open', () => {
             console.log(`教师端已启动，ID: ${teacherId}`);
             peerStatusSpan.innerText = `已启动 (${teacherId})`;
-            peerStatusSpan.style.color = 'green';
+            peerStatusSpan.style.background = '#2e7d32';
         });
         peer.on('connection', (conn) => {
             console.log('学生连接:', conn.peer);
             connections.push(conn);
-            // 创建学生卡片
             const studentId = conn.peer;
             createStudentCard(studentId);
             conn.on('data', (data) => {
                 if (data.type === 'ai_result') {
-                    // 更新UI
                     updateStudentFeedback(studentId, data);
                     addRecord(studentId, data.message, data.progress);
                 }
             });
             conn.on('close', () => {
-                console.log('学生断开:', studentId);
                 const card = document.getElementById(`card-${studentId}`);
                 if (card) card.remove();
+                updateStudentCount();
             });
         });
         peer.on('call', (call) => {
-            call.answer(); // 教师端不发送视频，只接收
+            call.answer();
             call.on('stream', (remoteStream) => {
                 const studentId = call.peer;
                 const videoElem = document.getElementById(`video-${studentId}`);
-                if (videoElem) videoElem.srcObject = remoteStream;
+                if (videoElem) {
+                    videoElem.srcObject = remoteStream;
+                }
             });
         });
         peer.on('error', (err) => {
             console.error(err);
             peerStatusSpan.innerText = `错误: ${err.type}`;
-            peerStatusSpan.style.color = 'red';
+            peerStatusSpan.style.background = '#c62828';
         });
     };
 
     function createStudentCard(studentId) {
-        const grid = document.getElementById('studentsGrid');
-        if (grid.children.length === 1 && grid.children[0].innerText.includes('等待')) grid.innerHTML = '';
+        if (studentsGrid.children.length === 1 && studentsGrid.children[0].innerText.includes('等待')) {
+            studentsGrid.innerHTML = '';
+        }
         const card = document.createElement('div');
         card.className = 'student-card';
         card.id = `card-${studentId}`;
         card.innerHTML = `
-            <div class="student-header"><span>📱 学生: ${studentId.slice(-6)}</span><span class="status">实训中</span></div>
-            <div class="video-preview"><video id="video-${studentId}" autoplay playsinline muted style="width:100%; height:100%; object-fit:cover;"></video></div>
-            <div class="ai-feedback" id="fb-${studentId}">等待...</div>
-            <div class="order-track" id="track-${studentId}"></div>
+            <div class="student-header">
+                <span>📱 学生: ${studentId.slice(-6)}</span>
+                <span class="status-badge" style="background:#2c7da0;">实训中</span>
+            </div>
+            <div class="video-preview">
+                <video id="video-${studentId}" autoplay playsinline muted></video>
+            </div>
+            <div class="ai-feedback" id="fb-${studentId}">等待AI反馈...</div>
+            <div class="order-track" id="track-${studentId}">⚪ 二尖瓣区 → ⚪ 肺动脉瓣区 → ⚪ 主动脉瓣区 → ⚪ 主动脉瓣第二听诊区 → ⚪ 三尖瓣区</div>
         `;
-        grid.appendChild(card);
-        studentsData.set(studentId, { feedbacks: [] });
+        studentsGrid.appendChild(card);
+        updateStudentCount();
     }
 
     function updateStudentFeedback(studentId, data) {
         const fbDiv = document.getElementById(`fb-${studentId}`);
         if (fbDiv) fbDiv.innerHTML = `${data.message} | ${data.progress}`;
-        // 更新顺序进度（可选）
         if (data.completedRegions) {
             const trackDiv = document.getElementById(`track-${studentId}`);
             if (trackDiv) {
                 const regions = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
                 let html = '';
                 regions.forEach(r => {
-                    if (data.completedRegions.includes(r)) html += `<span style="color:#2e7d32;">✅ ${r}</span> → `;
-                    else html += `<span style="color:#999;">⚪ ${r}</span> → `;
+                    if (data.completedRegions.includes(r)) {
+                        html += `<span style="color:#2e7d32;">✅ ${r}</span> → `;
+                    } else {
+                        html += `<span style="color:#999;">⚪ ${r}</span> → `;
+                    }
                 });
                 trackDiv.innerHTML = html.slice(0, -3);
             }
@@ -173,18 +184,23 @@
     }
 
     function addRecord(studentId, message, progress) {
-        const row = document.getElementById('recordsBody').insertRow(0);
+        const row = recordsBody.insertRow(0);
         row.insertCell(0).innerText = studentId.slice(-6);
         row.insertCell(1).innerText = new Date().toLocaleTimeString();
         row.insertCell(2).innerText = message;
         row.insertCell(3).innerText = progress;
-        document.getElementById('studentCount').innerText = document.querySelectorAll('.student-card').length;
+        updateStudentCount();
     }
 
-    // 原有顺序和模板上传代码保持不变（复制之前的）
+    function updateStudentCount() {
+        const count = document.querySelectorAll('.student-card').length;
+        studentCountSpan.innerText = count;
+    }
+
+    // ----------------------------- 顺序设置和模板标注 -----------------------------
+    const regionNames = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
     function initOrderSelector() {
         const container = document.getElementById('orderSelector');
-        const regionNames = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
         container.innerHTML = '';
         for (let i = 0; i < 5; i++) {
             const select = document.createElement('select');
@@ -210,15 +226,17 @@
     document.getElementById('saveOrderBtn').onclick = () => {
         const order = [];
         for (let i = 0; i < 5; i++) order.push(document.getElementById(`step${i+1}`).value);
-        fetch('/save_order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ order }) })
-            .then(() => document.getElementById('orderStatus').innerText = '✓ 顺序已保存');
+        fetch('/save_order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ order })
+        }).then(() => document.getElementById('orderStatus').innerText = '✓ 顺序已保存');
     };
 
-    // 模板上传和标注
     let regionPoints = {};
     let currentRegionIndex = 0;
-    const regionNames = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
     let markingCtx = null;
+
     document.getElementById('uploadTemplateBtn').onclick = () => {
         const file = document.getElementById('templateUpload').files[0];
         if (!file) return alert('请先选择图片');
@@ -248,6 +266,7 @@
                 }
             });
     };
+
     const canvasElem = document.getElementById('markingCanvas');
     canvasElem.onclick = (e) => {
         if (currentRegionIndex >= 5) return;
@@ -271,6 +290,7 @@
             document.getElementById('markingStatus').innerHTML = '✅ 所有听诊区已标注，点击“保存5个听诊区位置”';
         }
     };
+
     document.getElementById('saveRegionsBtn').onclick = () => {
         if (Object.keys(regionPoints).length !== 5) {
             alert(`请先标注完5个点，已完成 ${Object.keys(regionPoints).length}/5`);
@@ -288,8 +308,12 @@
 
     document.getElementById('exportBtn').onclick = () => {
         let csv = "学生,时间,AI评价,进度\n";
-        allRecords.forEach(r => {
-            csv += `"${r.studentId}","${r.time.toLocaleString()}","${r.message}","${r.progress}"\n`;
+        const rows = document.querySelectorAll('#recordsBody tr');
+        rows.forEach(row => {
+            const cells = row.querySelectorAll('td');
+            if (cells.length) {
+                csv += `"${cells[0].innerText}","${cells[1].innerText}","${cells[2].innerText}","${cells[3].innerText}"\n`;
+            }
         });
         const blob = new Blob(["\uFEFF" + csv], { type: 'text/csv' });
         const a = document.createElement('a');
