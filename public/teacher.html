@@ -1,3 +1,6 @@
+<!-- 在原有 teacher.html 基础上，在 <script> 区域添加 Peer 初始化 -->
+<!-- 完整代码较长，我给出核心添加部分，建议您直接复制下面的完整 teacher.html -->
+
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -5,6 +8,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>教师端 - 心脏听诊AI实训监控中心</title>
     <style>
+        /* 样式保持不变，沿用之前的 */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: #eef2f7; font-family: system-ui, sans-serif; padding: 20px; }
         .container { max-width: 1400px; margin: auto; }
@@ -26,6 +30,8 @@
         .records-table { background: white; border-radius: 20px; padding: 20px; overflow-x: auto; margin-top: 20px; }
         table { width: 100%; border-collapse: collapse; }
         th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
+        .room-control { background: white; padding: 15px; border-radius: 20px; margin-bottom: 20px; display: flex; gap: 10px; align-items: center; }
+        .room-control input { padding: 8px; border-radius: 20px; border: 1px solid #ccc; }
     </style>
 </head>
 <body>
@@ -35,7 +41,15 @@
         <div><span id="studentCount">0</span> 名学生在线</div>
     </div>
 
-    <!-- 配置区：顺序设置 -->
+    <!-- 新增：房间号设置与 Peer 启动 -->
+    <div class="room-control">
+        <span>房间号:</span>
+        <input type="text" id="roomInput" value="heart001">
+        <button id="startTeacherBtn">启动教师端（等待学生连接）</button>
+        <span id="peerStatus" style="color: green;">未启动</span>
+    </div>
+
+    <!-- 原有配置区 -->
     <div class="config-card">
         <div class="config-title">📋 1. 设定听诊顺序（5个瓣膜区）</div>
         <div class="order-selector" id="orderSelector"></div>
@@ -43,7 +57,6 @@
         <span id="orderStatus"></span>
     </div>
 
-    <!-- 配置区：模板图上传和标注 -->
     <div class="config-card">
         <div class="config-title">📍 2. 上传模拟人标准照片并标注听诊区（只需做一次）</div>
         <input type="file" id="templateUpload" accept="image/*">
@@ -53,12 +66,8 @@
         <button id="saveRegionsBtn" style="display:none;">保存5个听诊区位置</button>
     </div>
 
-    <!-- 学生实时画面网格 -->
-    <div class="students-grid" id="studentsGrid">
-        <div style="grid-column:1/-1; text-align:center; padding:40px; color:#888;">等待学生连接...</div>
-    </div>
+    <div class="students-grid" id="studentsGrid"></div>
 
-    <!-- 记录表 -->
     <div class="records-table">
         <h3>📋 考核记录</h3>
         <table id="recordsTable"><thead><tr><th>学生</th><th>时间</th><th>AI评价</th><th>进度</th></tr></thead><tbody id="recordsBody"></tbody></table>
@@ -67,19 +76,115 @@
 </div>
 
 <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+<script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
 <script>
+    // Socket.io 部分保持不变（用于信令和记录，但这里其实可以和 Peer 独立）
     const socket = io();
     let studentsData = new Map();
     let allRecords = [];
-    let regionPoints = {};
-    let currentRegionIndex = 0;
-    const regionNames = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
-    let markingCtx = null;
-    let currentImage = null;
 
-    // 生成顺序下拉框
+    // Peer 相关
+    let peer = null;
+    let connections = [];
+
+    // 房间号
+    const roomInput = document.getElementById('roomInput');
+    const startTeacherBtn = document.getElementById('startTeacherBtn');
+    const peerStatusSpan = document.getElementById('peerStatus');
+
+    // 启动教师端 Peer
+    startTeacherBtn.onclick = () => {
+        const room = roomInput.value.trim();
+        if (!room) return;
+        const teacherId = `teacher-${room}`;
+        if (peer) peer.destroy();
+        peer = new Peer(teacherId);
+        peer.on('open', () => {
+            console.log(`教师端已启动，ID: ${teacherId}`);
+            peerStatusSpan.innerText = `已启动 (${teacherId})`;
+            peerStatusSpan.style.color = 'green';
+        });
+        peer.on('connection', (conn) => {
+            console.log('学生连接:', conn.peer);
+            connections.push(conn);
+            // 创建学生卡片
+            const studentId = conn.peer;
+            createStudentCard(studentId);
+            conn.on('data', (data) => {
+                if (data.type === 'ai_result') {
+                    // 更新UI
+                    updateStudentFeedback(studentId, data);
+                    addRecord(studentId, data.message, data.progress);
+                }
+            });
+            conn.on('close', () => {
+                console.log('学生断开:', studentId);
+                const card = document.getElementById(`card-${studentId}`);
+                if (card) card.remove();
+            });
+        });
+        peer.on('call', (call) => {
+            call.answer(); // 教师端不发送视频，只接收
+            call.on('stream', (remoteStream) => {
+                const studentId = call.peer;
+                const videoElem = document.getElementById(`video-${studentId}`);
+                if (videoElem) videoElem.srcObject = remoteStream;
+            });
+        });
+        peer.on('error', (err) => {
+            console.error(err);
+            peerStatusSpan.innerText = `错误: ${err.type}`;
+            peerStatusSpan.style.color = 'red';
+        });
+    };
+
+    function createStudentCard(studentId) {
+        const grid = document.getElementById('studentsGrid');
+        if (grid.children.length === 1 && grid.children[0].innerText.includes('等待')) grid.innerHTML = '';
+        const card = document.createElement('div');
+        card.className = 'student-card';
+        card.id = `card-${studentId}`;
+        card.innerHTML = `
+            <div class="student-header"><span>📱 学生: ${studentId.slice(-6)}</span><span class="status">实训中</span></div>
+            <div class="video-preview"><video id="video-${studentId}" autoplay playsinline muted style="width:100%; height:100%; object-fit:cover;"></video></div>
+            <div class="ai-feedback" id="fb-${studentId}">等待...</div>
+            <div class="order-track" id="track-${studentId}"></div>
+        `;
+        grid.appendChild(card);
+        studentsData.set(studentId, { feedbacks: [] });
+    }
+
+    function updateStudentFeedback(studentId, data) {
+        const fbDiv = document.getElementById(`fb-${studentId}`);
+        if (fbDiv) fbDiv.innerHTML = `${data.message} | ${data.progress}`;
+        // 更新顺序进度（可选）
+        if (data.completedRegions) {
+            const trackDiv = document.getElementById(`track-${studentId}`);
+            if (trackDiv) {
+                const regions = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
+                let html = '';
+                regions.forEach(r => {
+                    if (data.completedRegions.includes(r)) html += `<span style="color:#2e7d32;">✅ ${r}</span> → `;
+                    else html += `<span style="color:#999;">⚪ ${r}</span> → `;
+                });
+                trackDiv.innerHTML = html.slice(0, -3);
+            }
+        }
+    }
+
+    function addRecord(studentId, message, progress) {
+        const row = document.getElementById('recordsBody').insertRow(0);
+        row.insertCell(0).innerText = studentId.slice(-6);
+        row.insertCell(1).innerText = new Date().toLocaleTimeString();
+        row.insertCell(2).innerText = message;
+        row.insertCell(3).innerText = progress;
+        document.getElementById('studentCount').innerText = document.querySelectorAll('.student-card').length;
+    }
+
+    // 原有顺序和模板上传代码保持不变（复制之前的）
     function initOrderSelector() {
         const container = document.getElementById('orderSelector');
+        const regionNames = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
         container.innerHTML = '';
         for (let i = 0; i < 5; i++) {
             const select = document.createElement('select');
@@ -97,15 +202,11 @@
                 container.appendChild(span);
             }
         }
-        // 默认标准顺序
         const defaultOrder = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
-        for (let i = 0; i < 5; i++) {
-            document.getElementById(`step${i+1}`).value = defaultOrder[i];
-        }
+        for (let i = 0; i < 5; i++) document.getElementById(`step${i+1}`).value = defaultOrder[i];
     }
     initOrderSelector();
 
-    // 保存顺序
     document.getElementById('saveOrderBtn').onclick = () => {
         const order = [];
         for (let i = 0; i < 5; i++) order.push(document.getElementById(`step${i+1}`).value);
@@ -113,7 +214,11 @@
             .then(() => document.getElementById('orderStatus').innerText = '✓ 顺序已保存');
     };
 
-    // 上传模板图
+    // 模板上传和标注
+    let regionPoints = {};
+    let currentRegionIndex = 0;
+    const regionNames = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
+    let markingCtx = null;
     document.getElementById('uploadTemplateBtn').onclick = () => {
         const file = document.getElementById('templateUpload').files[0];
         if (!file) return alert('请先选择图片');
@@ -143,8 +248,6 @@
                 }
             });
     };
-
-    // 画布点击标注
     const canvasElem = document.getElementById('markingCanvas');
     canvasElem.onclick = (e) => {
         if (currentRegionIndex >= 5) return;
@@ -168,8 +271,6 @@
             document.getElementById('markingStatus').innerHTML = '✅ 所有听诊区已标注，点击“保存5个听诊区位置”';
         }
     };
-
-    // 保存区域坐标
     document.getElementById('saveRegionsBtn').onclick = () => {
         if (Object.keys(regionPoints).length !== 5) {
             alert(`请先标注完5个点，已完成 ${Object.keys(regionPoints).length}/5`);
@@ -185,36 +286,6 @@
         });
     };
 
-    // Socket 事件
-    socket.on('ai_feedback', (data) => {
-        let card = document.getElementById(`card-${data.studentId}`);
-        if (!card) {
-            const grid = document.getElementById('studentsGrid');
-            if (grid.children.length === 1 && grid.children[0].innerText.includes('等待')) grid.innerHTML = '';
-            card = document.createElement('div');
-            card.className = 'student-card';
-            card.id = `card-${data.studentId}`;
-            card.innerHTML = `
-                <div class="student-header"><span>📱 学生: ${data.studentId.slice(-6)}</span><span class="status">实训中</span></div>
-                <div class="video-preview"><img id="img-${data.studentId}" src=""></div>
-                <div class="ai-feedback" id="fb-${data.studentId}">等待...</div>
-                <div class="order-track" id="track-${data.studentId}"></div>
-            `;
-            grid.appendChild(card);
-        }
-        if (data.frame) document.getElementById(`img-${data.studentId}`).src = data.frame;
-        const fbDiv = document.getElementById(`fb-${data.studentId}`);
-        if (fbDiv) fbDiv.innerHTML = `${data.result.message} | ${data.result.progress}`;
-        
-        const row = document.getElementById('recordsBody').insertRow(0);
-        row.insertCell(0).innerText = data.studentId.slice(-6);
-        row.insertCell(1).innerText = new Date().toLocaleTimeString();
-        row.insertCell(2).innerText = data.result.message;
-        row.insertCell(3).innerText = data.result.progress;
-        allRecords.unshift({ studentId: data.studentId.slice(-6), time: new Date(), message: data.result.message, progress: data.result.progress });
-        document.getElementById('studentCount').innerText = document.querySelectorAll('.student-card').length;
-    });
-
     document.getElementById('exportBtn').onclick = () => {
         let csv = "学生,时间,AI评价,进度\n";
         allRecords.forEach(r => {
@@ -226,8 +297,6 @@
         a.download = `实训记录_${Date.now()}.csv`;
         a.click();
     };
-
-    setInterval(() => socket.emit('teacher_get_students'), 5000);
 </script>
 </body>
 </html>
