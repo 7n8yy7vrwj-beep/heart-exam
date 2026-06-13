@@ -31,7 +31,6 @@
     <button class="tab-btn" data-tab="history">📜 历史记录</button>
 </div>
 
-<!-- 实时监控面板 -->
 <div id="monitor" class="panel active">
     <div class="room-control">
         <span>房间号：</span><input id="roomInput" value="exam001">
@@ -41,7 +40,6 @@
     <div id="studentsGrid" class="grid"></div>
 </div>
 
-<!-- 模板配置面板 -->
 <div id="config" class="panel">
     <h3>📸 上传模拟人标准照片并标注5个听诊区</h3>
     <input type="file" id="templateUpload" accept="image/*">
@@ -51,7 +49,6 @@
     <button id="saveRegionsBtn" style="display:none;">保存5个听诊区位置</button>
 </div>
 
-<!-- 历史记录面板 -->
 <div id="history" class="panel">
     <h3>📂 学生提交的考核记录</h3>
     <div id="historyList">加载中...</div>
@@ -59,58 +56,72 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-    // ---------- 实时监控逻辑 ----------
     let socket = null;
     let peerConnections = new Map(); // studentId -> RTCPeerConnection
 
+    // 启动教室
     document.getElementById('startTeacherBtn').onclick = () => {
         const room = document.getElementById('roomInput').value;
         if (socket) socket.disconnect();
         socket = io();
         socket.emit('teacher-join', room);
         document.getElementById('status').innerText = `教室已启动 (${room})`;
-        socket.on('new-student', (studentId) => {
-            addStudent(studentId);
-        });
+        
+        // 监听学生离开
         socket.on('student-left', (studentId) => {
             document.getElementById(`student-${studentId}`)?.remove();
+            peerConnections.delete(studentId);
         });
-        // ICE 信令处理
-        socket.on('offer', async (data) => { /* 教师端不会收到 offer，忽略 */ });
-        socket.on('answer', (data) => {
-            const pc = peerConnections.get(data.from);
-            if (pc) pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        
+        // 处理学生的 offer
+        socket.on('offer', async (data) => {
+            console.log('收到学生的 offer', data.from);
+            const studentId = data.from;
+            if (peerConnections.has(studentId)) return;
+            const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            peerConnections.set(studentId, pc);
+            
+            pc.ontrack = (event) => {
+                const video = document.createElement('video');
+                video.srcObject = event.streams[0];
+                video.autoplay = true;
+                video.playsInline = true;
+                const card = document.createElement('div');
+                card.className = 'student-card';
+                card.id = `student-${studentId}`;
+                card.innerHTML = `<div class="student-header">学生 ${studentId.slice(-6)}</div><div class="video-area"></div><div class="ai-feedback" id="fb-${studentId}">等待AI反馈...</div>`;
+                card.querySelector('.video-area').appendChild(video);
+                document.getElementById('studentsGrid').appendChild(card);
+            };
+            
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('ice-candidate', { target: studentId, candidate: event.candidate });
+                }
+            };
+            
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.emit('answer', { target: studentId, answer: pc.localDescription });
         });
-        socket.on('ice-candidate', (data) => {
+        
+        // 处理 ice 候选
+        socket.on('ice-candidate', async (data) => {
             const pc = peerConnections.get(data.from);
-            if (pc) pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            if (pc && data.candidate) {
+                await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            }
+        });
+        
+        // 接收 AI 反馈
+        socket.on('ai-feedback', (data) => {
+            const fbDiv = document.getElementById(`fb-${data.studentId}`);
+            if (fbDiv) fbDiv.innerHTML = `${data.message} | ${data.progress}`;
         });
     };
-
-    async function addStudent(studentId) {
-        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-        peerConnections.set(studentId, pc);
-        pc.ontrack = (event) => {
-            const video = document.createElement('video');
-            video.srcObject = event.streams[0];
-            video.autoplay = true;
-            video.playsInline = true;
-            const card = document.createElement('div');
-            card.className = 'student-card';
-            card.id = `student-${studentId}`;
-            card.innerHTML = `<div class="student-header">学生 ${studentId.slice(-6)}</div><div class="video-area"></div><div class="ai-feedback" id="fb-${studentId}">等待AI反馈...</div>`;
-            card.querySelector('.video-area').appendChild(video);
-            document.getElementById('studentsGrid').appendChild(card);
-        };
-        pc.onicecandidate = (event) => {
-            if (event.candidate) socket.emit('ice-candidate', { target: studentId, candidate: event.candidate });
-        };
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit('offer', { target: studentId, offer: pc.localDescription });
-    }
-
-    // ---------- 模板标注逻辑 ----------
+    
+    // 模板标注逻辑
     let regionPoints = {}, currentRegion = 0;
     const regionNames = ["二尖瓣区","肺动脉瓣区","主动脉瓣区","主动脉瓣第二听诊区","三尖瓣区"];
     let markingCtx = null;
@@ -162,8 +173,8 @@
         fetch('/save_regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regions: regionPoints }) })
             .then(() => alert('保存成功！学生端将自动使用这些坐标'));
     };
-
-    // ---------- 历史记录 ----------
+    
+    // 历史记录加载
     async function loadHistory() {
         const res = await fetch('/get_submissions');
         const subs = await res.json();
