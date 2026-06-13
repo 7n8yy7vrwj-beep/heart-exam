@@ -5,55 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>学生端 - 心脏听诊实训</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #0a1a2a; font-family: system-ui; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 16px; }
+        body { background: #0a1a2a; font-family: system-ui; margin: 0; padding: 16px; display: flex; justify-content: center; }
         .container { max-width: 550px; width: 100%; background: white; border-radius: 40px; overflow: hidden; }
         .header { background: #1e466e; color: white; padding: 20px; text-align: center; }
         .camera-area { background: black; aspect-ratio: 4/3; position: relative; margin: 10px; border-radius: 20px; overflow: hidden; }
         video, canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
         canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
         .controls { display: flex; gap: 12px; margin: 10px; }
-        button { flex: 1; padding: 14px; border: none; border-radius: 60px; font-weight: bold; font-size: 1rem; }
+        button { flex: 1; padding: 14px; border: none; border-radius: 60px; font-weight: bold; }
         .btn-start { background: #2e7d32; color: white; }
         .btn-stop { background: #c62828; color: white; }
         .feedback { background: #e8f0fe; margin: 10px; padding: 12px; border-radius: 20px; font-size: 0.85rem; }
         .room-input { display: flex; gap: 10px; margin: 16px; }
-        .room-input input { flex: 1; padding: 10px; border-radius: 30px; border: 1px solid #ccc; }
         .hidden { display: none; }
-        .report-card {
-            background: white;
-            margin: 16px;
-            padding: 16px;
-            border-radius: 24px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            font-size: 0.85rem;
-        }
-        .report-card table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 8px;
-        }
-        .report-card th, .report-card td {
-            border-bottom: 1px solid #ddd;
-            padding: 6px;
-            text-align: left;
-        }
-        .pass { color: #2e7d32; font-weight: bold; }
-        .fail { color: #c62828; font-weight: bold; }
     </style>
 </head>
 <body>
 <div class="container">
-    <div class="header">
-        <h2>🫀 心脏听诊实训</h2>
-        <p>AI实时定位 | 顺序+位置评价</p>
-    </div>
-
+    <div class="header"><h2>🫀 心脏听诊实训</h2><p>学生端 - 实时AI评价</p></div>
     <div class="room-input" id="roomPanel">
-        <input type="text" id="roomInput" placeholder="房间号" value="heart001">
+        <input type="text" id="roomInput" placeholder="房间号" value="exam001">
         <button id="connectBtn">连接教师端</button>
     </div>
-
     <div id="examPanel" class="hidden">
         <div class="camera-area">
             <video id="video" autoplay playsinline muted></video>
@@ -61,69 +34,56 @@
         </div>
         <div class="controls">
             <button id="startBtn" class="btn-start">开始考核</button>
-            <button id="stopBtn" class="btn-stop" disabled>结束</button>
+            <button id="stopBtn" class="btn-stop" disabled>结束并上传</button>
         </div>
         <div class="feedback" id="feedbackArea">等待开始...</div>
         <div class="feedback" id="taskHint"></div>
     </div>
-
-    <div id="finalReport" class="hidden report-card"></div>
 </div>
 
-<script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js"></script>
 <script>
-    // ----------------------------- 连接和配置 -----------------------------
-    let peer = null, conn = null, localStream = null, call = null;
+    // ---------- 全局 ----------
+    let socket = null, pc = null, localStream = null;
     let isActive = false, intervalId = null;
-    let studentId = 'student_' + Math.random().toString(36).substr(2, 8);
-    let room = 'heart001';
+    let studentId = 's_' + Math.random().toString(36).substr(2,6);
+    let room = 'exam001';
+    let mediaRecorder = null, recordedChunks = [];
 
+    // AI 配置
     let templateMat = null, templateKeypoints = null, templateDescriptors = null;
     let regionsTemplate = {};
-    let correctOrder = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
+    let correctOrder = ["二尖瓣区","肺动脉瓣区","主动脉瓣区","主动脉瓣第二听诊区","三尖瓣区"];
     let currentStep = 0, completed = [], stepDetails = [];
 
-    const roomPanel = document.getElementById('roomPanel');
-    const examPanel = document.getElementById('examPanel');
+    // DOM
     const video = document.getElementById('video');
     const canvas = document.getElementById('overlayCanvas');
     const ctx = canvas.getContext('2d');
     const connectBtn = document.getElementById('connectBtn');
     const roomInput = document.getElementById('roomInput');
+    const roomPanel = document.getElementById('roomPanel');
+    const examPanel = document.getElementById('examPanel');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const feedbackDiv = document.getElementById('feedbackArea');
     const taskHintDiv = document.getElementById('taskHint');
-    const finalReportDiv = document.getElementById('finalReport');
 
-    async function initCamera() {
-        try {
-            localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-            video.srcObject = localStream;
-            await video.play();
-            return true;
-        } catch(e) { feedbackDiv.innerHTML = '❌ 无法打开摄像头'; return false; }
-    }
-
-    async function loadTemplateAndFeatures() {
-        const config = await fetch('/get_config').then(res => res.json());
-        if (!config.templateUrl) {
-            feedbackDiv.innerHTML = '教师端尚未上传模拟人模板图，请联系老师先标注';
-            return false;
-        }
-        regionsTemplate = config.regionPositions || {};
-        if (Object.keys(regionsTemplate).length !== 5) {
-            feedbackDiv.innerHTML = '教师端未完成五个听诊区标注，请先标注';
-            return false;
-        }
-        correctOrder = config.order || correctOrder;
+    // ---------- 加载教师配置 ----------
+    async function loadConfig() {
+        const res = await fetch('/get_config');
+        const config = await res.json();
+        if (!config.templateUrl) throw new Error('教师未上传模板');
+        if (Object.keys(config.regionPositions).length !== 5) throw new Error('教师未标注5个区域');
+        correctOrder = config.order;
+        regionsTemplate = config.regionPositions;
+        // 加载模板图片并提取ORB特征
         const img = new Image();
         img.crossOrigin = 'Anonymous';
         await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = config.templateUrl; });
         let canvasTemp = document.createElement('canvas');
-        canvasTemp.width = img.width;
-        canvasTemp.height = img.height;
+        canvasTemp.width = img.width; canvasTemp.height = img.height;
         let ctxTemp = canvasTemp.getContext('2d');
         ctxTemp.drawImage(img, 0, 0);
         let imgData = ctxTemp.getImageData(0, 0, img.width, img.height);
@@ -136,25 +96,58 @@
         return true;
     }
 
-    function detectStethoscopeHead(videoElem, width, height) {
+    // ---------- 摄像头与 WebRTC ----------
+    async function initCamera() {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        video.srcObject = localStream;
+        await video.play();
+        // 开始录制
+        recordedChunks = [];
+        mediaRecorder = new MediaRecorder(localStream, { mimeType: 'video/webm' });
+        mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+        mediaRecorder.start(1000);
+    }
+
+    async function connectWebRTC() {
+        const teacherId = 'teacher-' + room; // 教师端在信令中没有固定ID，但教师已经加入房间
+        pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        pc.onicecandidate = (event) => {
+            if (event.candidate) socket.emit('ice-candidate', { target: 'teacher', candidate: event.candidate });
+        };
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('offer', { target: 'teacher', offer: pc.localDescription });
+        
+        socket.on('answer', async (data) => {
+            if (data.from === 'teacher') await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        });
+        socket.on('ice-candidate', async (data) => {
+            if (data.from === 'teacher') await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        });
+    }
+
+    // ---------- AI 视觉部分（听诊头检测、特征匹配）----------
+    function detectStethoscopeHead(videoElem, w, h) {
+        // 金属亮色检测
         let canvas = document.createElement('canvas');
-        canvas.width = width; canvas.height = height;
+        canvas.width = w; canvas.height = h;
         let ctx = canvas.getContext('2d');
-        ctx.drawImage(videoElem, 0, 0, width, height);
-        let imgData = ctx.getImageData(0, 0, width, height);
+        ctx.drawImage(videoElem, 0, 0, w, h);
+        let imgData = ctx.getImageData(0, 0, w, h);
         let data = imgData.data;
-        let totalX = 0, totalY = 0, count = 0;
-        for (let y = 0; y < height; y+=2) {
-            for (let x = 0; x < width; x+=2) {
-                let idx = (y*width + x)*4;
-                let r = data[idx], g = data[idx+1], b = data[idx+2];
+        let totalX=0, totalY=0, count=0;
+        for (let y=0; y<h; y+=2) {
+            for (let x=0; x<w; x+=2) {
+                let idx = (y*w + x)*4;
+                let r=data[idx], g=data[idx+1], b=data[idx+2];
                 let brightness = (r+g+b)/3;
-                if (brightness > 150 && Math.abs(r-g) < 50 && Math.abs(r-b) < 50) {
-                    totalX += x; totalY += y; count++;
+                if (brightness > 150 && Math.abs(r-g)<50 && Math.abs(r-b)<50) {
+                    totalX+=x; totalY+=y; count++;
                 }
             }
         }
-        if (count < 30) return null;
+        if (count<30) return null;
         return { x: totalX/count, y: totalY/count };
     }
 
@@ -164,36 +157,31 @@
         let knnMatches = new cv.DMatchVectorVector();
         matcher.knnMatch(srcDescriptors, dstDescriptors, knnMatches, 2);
         let goodMatches = [];
-        for (let i = 0; i < knnMatches.size(); i++) {
+        for (let i=0; i<knnMatches.size(); i++) {
             let matches = knnMatches.get(i);
-            if (matches.size() >= 2 && matches.get(0).distance < 0.75 * matches.get(1).distance) {
+            if (matches.size()>=2 && matches.get(0).distance < 0.75 * matches.get(1).distance)
                 goodMatches.push(matches.get(0));
-            }
         }
-        if (goodMatches.length < 4) return null;
-        let srcPoints = [], dstPoints = [];
-        for (let i = 0; i < goodMatches.length; i++) {
-            let match = goodMatches[i];
-            let srcIdx = match.queryIdx;
-            let dstIdx = match.trainIdx;
-            let srcKP = srcKeypoints.get(srcIdx);
-            let dstKP = dstKeypoints.get(dstIdx);
+        if (goodMatches.length<4) return null;
+        let srcPoints=[], dstPoints=[];
+        for (let m of goodMatches) {
+            let srcKP = srcKeypoints.get(m.queryIdx);
+            let dstKP = dstKeypoints.get(m.trainIdx);
             srcPoints.push([srcKP.pt.x, srcKP.pt.y]);
             dstPoints.push([dstKP.pt.x, dstKP.pt.y]);
         }
         let srcMat = cv.matFromArray(srcPoints.length, 1, cv.CV_32FC2, srcPoints.flat());
         let dstMat = cv.matFromArray(dstPoints.length, 1, cv.CV_32FC2, dstPoints.flat());
-        let homography = cv.findHomography(srcMat, dstMat, cv.RANSAC, 3.0);
+        let H = cv.findHomography(srcMat, dstMat, cv.RANSAC, 3.0);
         srcMat.delete(); dstMat.delete();
-        return homography;
+        return H;
     }
 
-    function applyHomography(point, H) {
-        let x = point.x, y = point.y;
-        let denominator = H.data[6]*x + H.data[7]*y + H.data[8];
-        let newX = (H.data[0]*x + H.data[1]*y + H.data[2]) / denominator;
-        let newY = (H.data[3]*x + H.data[4]*y + H.data[5]) / denominator;
-        return { x: newX, y: newY };
+    function applyHomography(p, H) {
+        let denom = H.data[6]*p.x + H.data[7]*p.y + H.data[8];
+        let nx = (H.data[0]*p.x + H.data[1]*p.y + H.data[2]) / denom;
+        let ny = (H.data[3]*p.x + H.data[4]*p.y + H.data[5]) / denom;
+        return { x: nx, y: ny };
     }
 
     let lastProcessTime = 0;
@@ -206,11 +194,9 @@
         lastProcessTime = now;
 
         let head = detectStethoscopeHead(video, w, h);
-        if (!head) {
-            feedbackDiv.innerHTML = `未检测到听诊器，请对准 ${correctOrder[currentStep]}`;
-            return;
-        }
+        if (!head) { feedbackDiv.innerHTML = `未检测到听诊器，请对准 ${correctOrder[currentStep]}`; return; }
 
+        // 提取当前帧特征并匹配
         let canvasTemp = document.createElement('canvas');
         canvasTemp.width = w; canvasTemp.height = h;
         let ctxTemp = canvasTemp.getContext('2d');
@@ -225,10 +211,7 @@
 
         let H = findHomography(templateMat, templateKeypoints, templateDescriptors, currentMat, curKeypoints, curDescriptors);
         currentMat.delete(); curDescriptors.delete();
-        if (!H) {
-            feedbackDiv.innerHTML = '无法对齐参考位置，请确保模拟人完整出现在画面中';
-            return;
-        }
+        if (!H) { feedbackDiv.innerHTML = '无法对齐参考位置，请确保模拟人完整在画面中'; return; }
 
         let mapped = applyHomography(head, H);
         H.delete();
@@ -237,50 +220,32 @@
         let minDist = 50;
         for (let [region, pos] of Object.entries(regionsTemplate)) {
             let dist = Math.hypot(mapped.x - pos.x, mapped.y - pos.y);
-            if (dist < minDist) {
-                minDist = dist;
-                detectedRegion = region;
-            }
+            if (dist < minDist) { minDist = dist; detectedRegion = region; }
         }
-        if (!detectedRegion) {
-            feedbackDiv.innerHTML = `听诊位置偏离，请对准 ${correctOrder[currentStep]}`;
-            return;
-        }
+        if (!detectedRegion) { feedbackDiv.innerHTML = `听诊位置偏离，请对准 ${correctOrder[currentStep]}`; return; }
 
         const expected = correctOrder[currentStep];
         let message = '';
-        let stepCompleted = false;
         if (detectedRegion === expected) {
             if (!completed.includes(expected)) {
                 completed.push(expected);
                 stepDetails.push({ region: expected, detected: detectedRegion, correct: true });
                 currentStep++;
-                stepCompleted = true;
                 message = `✅ ${expected} 正确！`;
                 if (currentStep < correctOrder.length) message += ` 下一步：${correctOrder[currentStep]}`;
-                else message = `🏆 恭喜！完成全部听诊顺序！`;
-            } else {
-                message = `📍 ${expected} 已经正确，继续下一步`;
-            }
+                else message = `🏆 完成全部听诊！`;
+            } else message = `📍 ${expected} 已正确，继续下一步`;
         } else {
-            const alreadyRecorded = stepDetails.some(d => d.region === expected && d.correct === false);
-            if (!alreadyRecorded) stepDetails.push({ region: expected, detected: detectedRegion, correct: false });
+            const already = stepDetails.some(d => d.region === expected && d.correct === false);
+            if (!already) stepDetails.push({ region: expected, detected: detectedRegion, correct: false });
             message = `❌ 位置错误：当前在${detectedRegion}，应先听${expected}`;
         }
-
         feedbackDiv.innerHTML = message;
         taskHintDiv.innerHTML = `当前任务: ${expected} | 已完成: ${completed.length}/${correctOrder.length}`;
 
-        // 发送结果给教师端
-        if (conn && conn.open) {
-            conn.send({
-                type: 'ai_result',
-                message: message,
-                progress: `${completed.length}/${correctOrder.length}`,
-                completedRegions: completed,
-                stepCompleted: stepCompleted,
-                detectedRegion: detectedRegion
-            });
+        // 发送AI结果到教师端（通过信令）
+        if (socket) {
+            socket.emit('ai-feedback', { studentId, message, progress: `${completed.length}/${correctOrder.length}`, completedRegions: completed });
         }
 
         if (completed.length === correctOrder.length && isActive) {
@@ -288,93 +253,59 @@
             clearInterval(intervalId);
             startBtn.disabled = false;
             stopBtn.disabled = true;
-            showFinalReport();
+            if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+            uploadExam();
         }
     }
 
-    function showFinalReport() {
-        const total = correctOrder.length;
-        const correctSteps = stepDetails.filter(d => d.correct === true).length;
-        const passed = correctSteps === total;
-        let html = `<h3>📊 考核报告</h3>`;
-        html += `<p class="${passed ? 'pass' : 'fail'}">${passed ? '✅ 考核通过！' : '❌ 考核未通过'}</p>`;
-        html += `<p>正确部位：${correctSteps}/${total}</p>`;
-        html += `<tr><thead><tr><th>听诊区</th><th>检测情况</th><th>结果</th></tr></thead><tbody>`;
-        for (let step of correctOrder) {
-            const detail = stepDetails.find(d => d.region === step);
-            const status = detail ? (detail.correct ? '✅ 正确' : `❌ 错误（检测到${detail.detected}）`) : '⚪ 未检测';
-            html += `<tr><td>${step}</td><td>${detail ? detail.detected : '-'}</td><td>${status}</td></tr>`;
-        }
-        html += `</tbody></table>`;
-        if (!passed) {
-            html += `<p><strong>📝 改进建议：</strong></p><ul>`;
-            for (let step of correctOrder) {
-                const detail = stepDetails.find(d => d.region === step);
-                if (detail && !detail.correct) html += `<li>${step}：位置错误（应放在${step}，检测到${detail.detected}）</li>`;
-                else if (!detail) html += `<li>${step}：未检测到听诊器放置</li>`;
-            }
-            html += `</ul>`;
-        }
-        finalReportDiv.innerHTML = html;
-        finalReportDiv.classList.remove('hidden');
+    async function uploadExam() {
+        if (!recordedChunks.length) { alert('没有录制到视频'); return; }
+        const videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+        const formData = new FormData();
+        formData.append('video', videoBlob, `exam_${Date.now()}.webm`);
+        formData.append('studentName', `学生_${studentId}`);
+        formData.append('report', JSON.stringify({ steps: stepDetails, correctSteps: completed.length, total: correctOrder.length, details: stepDetails.map(s=>`${s.region}:${s.correct?'✅':'❌'}`).join(',') }));
+        const res = await fetch('/submit_exam', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.status === 'ok') alert('考核结果已上传，教师端可查看');
+        else alert('上传失败');
     }
 
+    // ---------- 连接流程 ----------
     connectBtn.onclick = async () => {
         room = roomInput.value.trim();
         if (!room) return;
-        const teacherId = `teacher-${room}`;
-        if (peer) peer.destroy();
-        peer = new Peer();
-        peer.on('open', async (id) => {
-            studentId = id;
-            conn = peer.connect(teacherId);
-            conn.on('open', async () => {
-                console.log('已连接到教师端');
-                const ok = await loadTemplateAndFeatures();
-                if (!ok) return;
+        socket = io();
+        socket.emit('student-join', room);
+        socket.on('connect', async () => {
+            try {
+                await loadConfig();
                 await initCamera();
+                await connectWebRTC();
                 roomPanel.classList.add('hidden');
                 examPanel.classList.remove('hidden');
                 feedbackDiv.innerHTML = '已连接，点击开始考核';
                 taskHintDiv.innerHTML = `顺序：${correctOrder.join(' → ')}`;
-            });
-            conn.on('error', (err) => {
-                console.error('连接错误', err);
-                feedbackDiv.innerHTML = '连接教师端失败，请检查教师端是否已启动';
-            });
+            } catch(e) { feedbackDiv.innerHTML = '配置加载失败：'+e.message; }
         });
-        peer.on('error', (err) => {
-            console.error('Peer错误', err);
-            feedbackDiv.innerHTML = '连接失败，请重试';
-        });
+        // 接收AI反馈转发（可选）
+        socket.on('ai-feedback', (data) => { /* 可忽略 */ });
     };
 
     startBtn.onclick = () => {
-        if (!localStream) return;
         isActive = true;
-        currentStep = 0;
-        completed = [];
-        stepDetails = [];
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
+        currentStep = 0; completed = []; stepDetails = [];
+        startBtn.disabled = true; stopBtn.disabled = false;
         if (intervalId) clearInterval(intervalId);
         intervalId = setInterval(processFrame, 400);
-        feedbackDiv.innerHTML = '考核进行中，请按顺序放置听诊器...';
-        finalReportDiv.classList.add('hidden');
+        feedbackDiv.innerHTML = '考核进行中...';
     };
-
     stopBtn.onclick = () => {
         isActive = false;
         clearInterval(intervalId);
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        showFinalReport();
-        if (conn && conn.open) conn.send({ type: 'ai_result', message: '考核结束', progress: `${completed.length}/${correctOrder.length}` });
-    };
-
-    window.onbeforeunload = () => {
-        if (intervalId) clearInterval(intervalId);
-        if (localStream) localStream.getTracks().forEach(t => t.stop());
+        startBtn.disabled = false; stopBtn.disabled = true;
+        if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+        uploadExam();
     };
 </script>
 </body>
