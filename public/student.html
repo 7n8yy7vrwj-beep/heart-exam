@@ -44,7 +44,6 @@
 <script src="/socket.io/socket.io.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js"></script>
 <script>
-    // ---------- 全局 ----------
     let socket = null, pc = null, localStream = null;
     let isActive = false, intervalId = null;
     let studentId = 's_' + Math.random().toString(36).substr(2,6);
@@ -70,7 +69,6 @@
     const feedbackDiv = document.getElementById('feedbackArea');
     const taskHintDiv = document.getElementById('taskHint');
 
-    // ---------- 加载教师配置 ----------
     async function loadConfig() {
         const res = await fetch('/get_config');
         const config = await res.json();
@@ -78,7 +76,6 @@
         if (Object.keys(config.regionPositions).length !== 5) throw new Error('教师未标注5个区域');
         correctOrder = config.order;
         regionsTemplate = config.regionPositions;
-        // 加载模板图片并提取ORB特征
         const img = new Image();
         img.crossOrigin = 'Anonymous';
         await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = config.templateUrl; });
@@ -96,12 +93,10 @@
         return true;
     }
 
-    // ---------- 摄像头与 WebRTC ----------
     async function initCamera() {
         localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
         video.srcObject = localStream;
         await video.play();
-        // 开始录制
         recordedChunks = [];
         mediaRecorder = new MediaRecorder(localStream, { mimeType: 'video/webm' });
         mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
@@ -109,11 +104,12 @@
     }
 
     async function connectWebRTC() {
-        const teacherId = 'teacher-' + room; // 教师端在信令中没有固定ID，但教师已经加入房间
         pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
         localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
         pc.onicecandidate = (event) => {
-            if (event.candidate) socket.emit('ice-candidate', { target: 'teacher', candidate: event.candidate });
+            if (event.candidate) {
+                socket.emit('ice-candidate', { target: 'teacher', candidate: event.candidate });
+            }
         };
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -127,9 +123,8 @@
         });
     }
 
-    // ---------- AI 视觉部分（听诊头检测、特征匹配）----------
+    // 听诊头检测（简化版，实际可用金属色检测）
     function detectStethoscopeHead(videoElem, w, h) {
-        // 金属亮色检测
         let canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         let ctx = canvas.getContext('2d');
@@ -196,7 +191,6 @@
         let head = detectStethoscopeHead(video, w, h);
         if (!head) { feedbackDiv.innerHTML = `未检测到听诊器，请对准 ${correctOrder[currentStep]}`; return; }
 
-        // 提取当前帧特征并匹配
         let canvasTemp = document.createElement('canvas');
         canvasTemp.width = w; canvasTemp.height = h;
         let ctxTemp = canvasTemp.getContext('2d');
@@ -243,9 +237,13 @@
         feedbackDiv.innerHTML = message;
         taskHintDiv.innerHTML = `当前任务: ${expected} | 已完成: ${completed.length}/${correctOrder.length}`;
 
-        // 发送AI结果到教师端（通过信令）
         if (socket) {
-            socket.emit('ai-feedback', { studentId, message, progress: `${completed.length}/${correctOrder.length}`, completedRegions: completed });
+            socket.emit('ai-feedback', {
+                studentId,
+                message,
+                progress: `${completed.length}/${correctOrder.length}`,
+                completedRegions: completed
+            });
         }
 
         if (completed.length === correctOrder.length && isActive) {
@@ -271,7 +269,6 @@
         else alert('上传失败');
     }
 
-    // ---------- 连接流程 ----------
     connectBtn.onclick = async () => {
         room = roomInput.value.trim();
         if (!room) return;
@@ -288,8 +285,6 @@
                 taskHintDiv.innerHTML = `顺序：${correctOrder.join(' → ')}`;
             } catch(e) { feedbackDiv.innerHTML = '配置加载失败：'+e.message; }
         });
-        // 接收AI反馈转发（可选）
-        socket.on('ai-feedback', (data) => { /* 可忽略 */ });
     };
 
     startBtn.onclick = () => {
