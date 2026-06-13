@@ -3,13 +3,63 @@ const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const path = require('path');
+const multer = require('multer');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.static('public'));
 app.use(express.json({ limit: '50mb' }));
 
-// 根路径返回教师端页面
+// 配置文件上传
+const upload = multer({ dest: 'uploads/' });
+
+// 确保 public 目录存在
+if (!fs.existsSync('public')) fs.mkdirSync('public');
+
+// ========== 配置存储 ==========
+let examConfig = {
+  order: ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"],
+  regionPositions: {}   // 教师标注的5个区域坐标（在模板图上）
+};
+
+const studentProgress = new Map();
+let allRecords = [];
+
+// ========== API ==========
+// 教师端上传模板图
+app.post('/upload_template', upload.single('template'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: '没有文件' });
+  const targetPath = path.join(__dirname, 'public', 'template.jpg');
+  fs.renameSync(req.file.path, targetPath);
+  res.json({ status: 'ok', url: '/template.jpg' });
+});
+
+// 提供模板图下载
+app.get('/template.jpg', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'template.jpg'));
+});
+
+// 保存听诊区位置
+app.post('/save_regions', (req, res) => {
+  examConfig.regionPositions = req.body.regions;
+  // 可选：持久化到文件
+  fs.writeFileSync('config.json', JSON.stringify(examConfig));
+  res.json({ status: 'ok' });
+});
+
+// 获取配置（顺序、区域坐标、模板图地址）
+app.get('/get_config', (req, res) => {
+  // 检查模板图是否存在
+  const templateUrl = fs.existsSync(path.join(__dirname, 'public', 'template.jpg')) ? '/template.jpg' : null;
+  res.json({
+    order: examConfig.order,
+    regionPositions: examConfig.regionPositions,
+    templateUrl: templateUrl
+  });
+});
+
+// 教师端页面
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'teacher.html'));
 });
@@ -20,31 +70,7 @@ const io = socketIo(server, {
   transports: ['websocket', 'polling']
 });
 
-// ========== 配置存储 ==========
-let examConfig = {
-  order: ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"],
-  regionPositions: {}
-};
-
-const studentProgress = new Map();
-let allRecords = [];
-
-// ========== API ==========
-app.post('/save_order', (req, res) => {
-  examConfig.order = req.body.order;
-  res.json({ status: 'ok' });
-});
-
-app.post('/save_regions', (req, res) => {
-  examConfig.regionPositions = req.body.regions;
-  res.json({ status: 'ok' });
-});
-
-app.get('/get_config', (req, res) => {
-  res.json({ order: examConfig.order, regionPositions: examConfig.regionPositions });
-});
-
-// ========== Socket.IO ==========
+// ========== Socket.IO 事件 ==========
 io.on('connection', (socket) => {
   console.log('新连接:', socket.id);
 
@@ -54,8 +80,6 @@ io.on('connection', (socket) => {
       currentStep: 0,
       completed: [],
       stepTimes: [],
-      lastRegion: null,
-      lastTime: null,
       startTime: null
     });
     socket.emit('registered', { studentId });
@@ -69,8 +93,6 @@ io.on('connection', (socket) => {
       prog.completed = [];
       prog.stepTimes = [];
       prog.startTime = Date.now();
-      prog.lastRegion = null;
-      prog.lastTime = null;
     }
     io.emit('student_status', { studentId, status: 'started' });
   });
@@ -85,8 +107,7 @@ io.on('connection', (socket) => {
         prog.stepTimes.push({
           step: prog.currentStep + 1,
           region: expected,
-          timestamp: new Date().toLocaleTimeString(),
-          duration: result.duration || 2.0
+          timestamp: new Date().toLocaleTimeString()
         });
         prog.currentStep++;
       }
