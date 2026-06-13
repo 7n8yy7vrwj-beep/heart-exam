@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>学生端 - 心脏听诊实训（顺序+位置评价，无时长要求）</title>
+    <title>学生端 - 心脏听诊实训</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: #0a1a2a; font-family: system-ui; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 16px; }
@@ -49,13 +49,11 @@
         <p>AI实时定位 | 顺序+位置评价</p>
     </div>
 
-    <!-- 连接教师端 -->
     <div class="room-input" id="roomPanel">
         <input type="text" id="roomInput" placeholder="房间号" value="heart001">
         <button id="connectBtn">连接教师端</button>
     </div>
 
-    <!-- 考核界面 -->
     <div id="examPanel" class="hidden">
         <div class="camera-area">
             <video id="video" autoplay playsinline muted></video>
@@ -69,34 +67,23 @@
         <div class="feedback" id="taskHint"></div>
     </div>
 
-    <!-- 最终报告（初始隐藏） -->
     <div id="finalReport" class="hidden report-card"></div>
 </div>
 
 <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js"></script>
 <script>
-    // ----------------------------- 全局变量 ---------------------------------
+    // ----------------------------- 连接和配置 -----------------------------
     let peer = null, conn = null, localStream = null, call = null;
     let isActive = false, intervalId = null;
     let studentId = 'student_' + Math.random().toString(36).substr(2, 8);
     let room = 'heart001';
 
-    // 模板数据
-    let templateMat = null;
-    let templateKeypoints = null;
-    let templateDescriptors = null;
-    let templateWidth = 0, templateHeight = 0;
-    let regionsTemplate = {};        // 教师标注的区域坐标（在模板图上）
+    let templateMat = null, templateKeypoints = null, templateDescriptors = null;
+    let regionsTemplate = {};
     let correctOrder = ["二尖瓣区", "肺动脉瓣区", "主动脉瓣区", "主动脉瓣第二听诊区", "三尖瓣区"];
-    
-    // 考核进度（无时长要求，只要检测到正确区域就立即标记完成）
-    let currentStep = 0;            // 期待的第几个区域（0-4）
-    let completed = [];              // 已经正确完成的区域名称
-    let stepDetails = [];            // 记录每个步骤的详情：{ region, detected, correct, orderOk }
-    let lastDetectedRegion = null;   // 用于防止连续帧重复完成同一个区域
+    let currentStep = 0, completed = [], stepDetails = [];
 
-    // DOM
     const roomPanel = document.getElementById('roomPanel');
     const examPanel = document.getElementById('examPanel');
     const video = document.getElementById('video');
@@ -110,7 +97,6 @@
     const taskHintDiv = document.getElementById('taskHint');
     const finalReportDiv = document.getElementById('finalReport');
 
-    // ---------- 辅助函数 ----------
     async function initCamera() {
         try {
             localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
@@ -120,7 +106,6 @@
         } catch(e) { feedbackDiv.innerHTML = '❌ 无法打开摄像头'; return false; }
     }
 
-    // 加载模板图并提取特征（只需一次）
     async function loadTemplateAndFeatures() {
         const config = await fetch('/get_config').then(res => res.json());
         if (!config.templateUrl) {
@@ -132,15 +117,10 @@
             feedbackDiv.innerHTML = '教师端未完成五个听诊区标注，请先标注';
             return false;
         }
-        // 下载模板图片
+        correctOrder = config.order || correctOrder;
         const img = new Image();
         img.crossOrigin = 'Anonymous';
-        await new Promise((resolve, reject) => {
-            img.onload = resolve;
-            img.onerror = reject;
-            img.src = config.templateUrl;
-        });
-        // 转为 cv.Mat
+        await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = config.templateUrl; });
         let canvasTemp = document.createElement('canvas');
         canvasTemp.width = img.width;
         canvasTemp.height = img.height;
@@ -148,9 +128,6 @@
         ctxTemp.drawImage(img, 0, 0);
         let imgData = ctxTemp.getImageData(0, 0, img.width, img.height);
         templateMat = cv.matFromImageData(imgData);
-        templateWidth = img.width;
-        templateHeight = img.height;
-        // 提取ORB特征
         let orb = new cv.ORB();
         templateKeypoints = new cv.KeyPointVector();
         templateDescriptors = new cv.Mat();
@@ -159,7 +136,28 @@
         return true;
     }
 
-    // 特征匹配 + 单应性矩阵
+    function detectStethoscopeHead(videoElem, width, height) {
+        let canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        let ctx = canvas.getContext('2d');
+        ctx.drawImage(videoElem, 0, 0, width, height);
+        let imgData = ctx.getImageData(0, 0, width, height);
+        let data = imgData.data;
+        let totalX = 0, totalY = 0, count = 0;
+        for (let y = 0; y < height; y+=2) {
+            for (let x = 0; x < width; x+=2) {
+                let idx = (y*width + x)*4;
+                let r = data[idx], g = data[idx+1], b = data[idx+2];
+                let brightness = (r+g+b)/3;
+                if (brightness > 150 && Math.abs(r-g) < 50 && Math.abs(r-b) < 50) {
+                    totalX += x; totalY += y; count++;
+                }
+            }
+        }
+        if (count < 30) return null;
+        return { x: totalX/count, y: totalY/count };
+    }
+
     function findHomography(srcMat, srcKeypoints, srcDescriptors, dstMat, dstKeypoints, dstDescriptors) {
         let matcher = new cv.DescriptorMatcher();
         matcher.create('BruteForce-Hamming');
@@ -198,31 +196,6 @@
         return { x: newX, y: newY };
     }
 
-    // 检测听诊头（基于金属亮色，可调整）
-    function detectStethoscopeHead(videoElem, width, height) {
-        let canvas = document.createElement('canvas');
-        canvas.width = width; canvas.height = height;
-        let ctx = canvas.getContext('2d');
-        ctx.drawImage(videoElem, 0, 0, width, height);
-        let imgData = ctx.getImageData(0, 0, width, height);
-        let data = imgData.data;
-        let totalX = 0, totalY = 0, count = 0;
-        for (let y = 0; y < height; y+=2) {
-            for (let x = 0; x < width; x+=2) {
-                let idx = (y*width + x)*4;
-                let r = data[idx], g = data[idx+1], b = data[idx+2];
-                let brightness = (r+g+b)/3;
-                // 亮色且低饱和度（金属特征）
-                if (brightness > 150 && Math.abs(r-g) < 50 && Math.abs(r-b) < 50) {
-                    totalX += x; totalY += y; count++;
-                }
-            }
-        }
-        if (count < 30) return null;
-        return { x: totalX/count, y: totalY/count };
-    }
-
-    // 考核主循环（无时长要求，检测到正确区域立即完成）
     let lastProcessTime = 0;
     async function processFrame() {
         if (!isActive || !templateMat) return;
@@ -232,14 +205,12 @@
         if (now - lastProcessTime < 300) return;
         lastProcessTime = now;
 
-        // 1. 检测听诊头
         let head = detectStethoscopeHead(video, w, h);
         if (!head) {
             feedbackDiv.innerHTML = `未检测到听诊器，请对准 ${correctOrder[currentStep]}`;
             return;
         }
 
-        // 2. 提取当前帧特征
         let canvasTemp = document.createElement('canvas');
         canvasTemp.width = w; canvasTemp.height = h;
         let ctxTemp = canvasTemp.getContext('2d');
@@ -252,7 +223,6 @@
         orb.detectAndCompute(currentMat, new cv.Mat(), curKeypoints, curDescriptors);
         orb.delete();
 
-        // 3. 特征匹配得到单应性矩阵
         let H = findHomography(templateMat, templateKeypoints, templateDescriptors, currentMat, curKeypoints, curDescriptors);
         currentMat.delete(); curDescriptors.delete();
         if (!H) {
@@ -260,13 +230,11 @@
             return;
         }
 
-        // 4. 映射听诊头坐标到模板图
         let mapped = applyHomography(head, H);
         H.delete();
 
-        // 5. 判断落在哪个区域
         let detectedRegion = null;
-        let minDist = 50; // 像素阈值
+        let minDist = 50;
         for (let [region, pos] of Object.entries(regionsTemplate)) {
             let dist = Math.hypot(mapped.x - pos.x, mapped.y - pos.y);
             if (dist < minDist) {
@@ -279,88 +247,51 @@
             return;
         }
 
-        // 6. 顺序逻辑 + 无时长要求：只要检测到正确区域且未完成当前步骤，立即完成
         const expected = correctOrder[currentStep];
         let message = '';
         let stepCompleted = false;
-
         if (detectedRegion === expected) {
-            // 位置正确，检查是否已经完成过这个区域（防止重复完成）
             if (!completed.includes(expected)) {
-                // 立即完成当前步骤
                 completed.push(expected);
-                stepCompleted = true;
-                // 记录详情
-                stepDetails.push({
-                    region: expected,
-                    detected: detectedRegion,
-                    correct: true,
-                    orderOk: true,
-                    timestamp: new Date().toLocaleTimeString()
-                });
+                stepDetails.push({ region: expected, detected: detectedRegion, correct: true });
                 currentStep++;
+                stepCompleted = true;
                 message = `✅ ${expected} 正确！`;
-                if (currentStep < correctOrder.length) {
-                    message += ` 下一步：${correctOrder[currentStep]}`;
-                } else {
-                    message = `🏆 恭喜！完成全部听诊顺序！`;
-                }
-                // 发送给教师端
-                if (conn) {
-                    conn.send({
-                        type: 'ai_result',
-                        message: message,
-                        progress: `${completed.length}/${correctOrder.length}`,
-                        completedRegions: completed,
-                        stepCompleted: true,
-                        detectedRegion: detectedRegion
-                    });
-                }
+                if (currentStep < correctOrder.length) message += ` 下一步：${correctOrder[currentStep]}`;
+                else message = `🏆 恭喜！完成全部听诊顺序！`;
             } else {
-                // 已经完成过，只是再次正确放置
                 message = `📍 ${expected} 已经正确，继续下一步`;
             }
         } else {
-            // 位置错误：记录错误详情（每个区域只记录一次错误，避免刷屏）
             const alreadyRecorded = stepDetails.some(d => d.region === expected && d.correct === false);
-            if (!alreadyRecorded) {
-                stepDetails.push({
-                    region: expected,
-                    detected: detectedRegion,
-                    correct: false,
-                    orderOk: false,
-                    timestamp: new Date().toLocaleTimeString()
-                });
-            }
+            if (!alreadyRecorded) stepDetails.push({ region: expected, detected: detectedRegion, correct: false });
             message = `❌ 位置错误：当前在${detectedRegion}，应先听${expected}`;
-            if (conn) {
-                conn.send({
-                    type: 'ai_result',
-                    message: message,
-                    progress: `${completed.length}/${correctOrder.length}`,
-                    stepCompleted: false,
-                    detectedRegion: detectedRegion
-                });
-            }
         }
 
         feedbackDiv.innerHTML = message;
         taskHintDiv.innerHTML = `当前任务: ${expected} | 已完成: ${completed.length}/${correctOrder.length}`;
 
-        // 如果所有步骤完成，自动结束考核（可选）
+        // 发送结果给教师端
+        if (conn && conn.open) {
+            conn.send({
+                type: 'ai_result',
+                message: message,
+                progress: `${completed.length}/${correctOrder.length}`,
+                completedRegions: completed,
+                stepCompleted: stepCompleted,
+                detectedRegion: detectedRegion
+            });
+        }
+
         if (completed.length === correctOrder.length && isActive) {
             isActive = false;
             clearInterval(intervalId);
             startBtn.disabled = false;
             stopBtn.disabled = true;
             showFinalReport();
-            if (conn) {
-                conn.send({ type: 'ai_result', message: '考核完成', progress: `${completed.length}/${correctOrder.length}` });
-            }
         }
     }
 
-    // 显示最终报告
     function showFinalReport() {
         const total = correctOrder.length;
         const correctSteps = stepDetails.filter(d => d.correct === true).length;
@@ -368,7 +299,7 @@
         let html = `<h3>📊 考核报告</h3>`;
         html += `<p class="${passed ? 'pass' : 'fail'}">${passed ? '✅ 考核通过！' : '❌ 考核未通过'}</p>`;
         html += `<p>正确部位：${correctSteps}/${total}</p>`;
-        html += `<table><thead><tr><th>听诊区</th><th>检测情况</th><th>结果</th></tr></thead><tbody>`;
+        html += `<tr><thead><tr><th>听诊区</th><th>检测情况</th><th>结果</th></tr></thead><tbody>`;
         for (let step of correctOrder) {
             const detail = stepDetails.find(d => d.region === step);
             const status = detail ? (detail.correct ? '✅ 正确' : `❌ 错误（检测到${detail.detected}）`) : '⚪ 未检测';
@@ -379,11 +310,8 @@
             html += `<p><strong>📝 改进建议：</strong></p><ul>`;
             for (let step of correctOrder) {
                 const detail = stepDetails.find(d => d.region === step);
-                if (detail && !detail.correct) {
-                    html += `<li>${step}：位置错误（应放在${step}，检测到${detail.detected}）</li>`;
-                } else if (!detail) {
-                    html += `<li>${step}：未检测到听诊器放置</li>`;
-                }
+                if (detail && !detail.correct) html += `<li>${step}：位置错误（应放在${step}，检测到${detail.detected}）</li>`;
+                else if (!detail) html += `<li>${step}：未检测到听诊器放置</li>`;
             }
             html += `</ul>`;
         }
@@ -391,7 +319,6 @@
         finalReportDiv.classList.remove('hidden');
     }
 
-    // ---------- 连接教师端 ----------
     connectBtn.onclick = async () => {
         room = roomInput.value.trim();
         if (!room) return;
@@ -402,7 +329,7 @@
             studentId = id;
             conn = peer.connect(teacherId);
             conn.on('open', async () => {
-                console.log('已连接教师端');
+                console.log('已连接到教师端');
                 const ok = await loadTemplateAndFeatures();
                 if (!ok) return;
                 await initCamera();
@@ -411,9 +338,15 @@
                 feedbackDiv.innerHTML = '已连接，点击开始考核';
                 taskHintDiv.innerHTML = `顺序：${correctOrder.join(' → ')}`;
             });
-            conn.on('error', console.error);
+            conn.on('error', (err) => {
+                console.error('连接错误', err);
+                feedbackDiv.innerHTML = '连接教师端失败，请检查教师端是否已启动';
+            });
         });
-        peer.on('error', console.error);
+        peer.on('error', (err) => {
+            console.error('Peer错误', err);
+            feedbackDiv.innerHTML = '连接失败，请重试';
+        });
     };
 
     startBtn.onclick = () => {
@@ -422,7 +355,6 @@
         currentStep = 0;
         completed = [];
         stepDetails = [];
-        lastDetectedRegion = null;
         startBtn.disabled = true;
         stopBtn.disabled = false;
         if (intervalId) clearInterval(intervalId);
@@ -437,12 +369,9 @@
         startBtn.disabled = false;
         stopBtn.disabled = true;
         showFinalReport();
-        if (conn) {
-            conn.send({ type: 'ai_result', message: '考核结束', progress: `${completed.length}/${correctOrder.length}` });
-        }
+        if (conn && conn.open) conn.send({ type: 'ai_result', message: '考核结束', progress: `${completed.length}/${correctOrder.length}` });
     };
 
-    // 清理资源
     window.onbeforeunload = () => {
         if (intervalId) clearInterval(intervalId);
         if (localStream) localStream.getTracks().forEach(t => t.stop());
