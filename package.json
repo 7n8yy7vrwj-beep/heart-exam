@@ -1,7 +1,7 @@
 {
   "name": "heart-exam-ai",
   "version": "1.0.0",
-  "description": "心脏听诊AI实训系统",
+  "description": "心脏听诊AI实训系统 - 支持模板图标注、顺序位置评价",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,6 +9,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.5.4",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "multer": "^1.4.5-lts.1"
   }
 }
